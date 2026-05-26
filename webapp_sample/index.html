@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>거북목 자세 분석기</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">POSTURE INSIGHT</p>
+                <h1>사진으로 거북목 자세를 판정하고 분석합니다.</h1>
+                <p class="hero-text">
+                    자세 사진과 생활 습관 정보를 함께 입력하면 ChatGPT API를 통해
+                    CVA와 위험도를 추정하고 개인 맞춤 피드백을 제공합니다.
+                </p>
+            </div>
+            <div class="hero-card hero-card-compact">
+                <p class="hero-card-title">분석 방식</p>
+                <p>업로드한 자세 사진 한 장을 기준으로 측면 정렬과 목 전방 이동을 함께 추정합니다.</p>
+            </div>
+        </header>
+
+        <main class="content-grid">
+            <section class="panel form-panel">
+                <div class="panel-header">
+                    <h2>입력 정보</h2>
+                    <p>API 키는 저장하지 않으며 현재 브라우저 세션에서만 사용됩니다.</p>
+                    <p>브라우저에서 OpenAI API를 직접 호출하므로 개인 테스트 용도로 사용하는 구성이며, 배포용이라면 서버 프록시를 두는 편이 안전합니다.</p>
+                </div>
+
+                <form id="analysis-form" class="analysis-form">
+                    <div class="input-group">
+                        <div class="group-header">
+                            <h3>사진 업로드</h3>
+                            <p>사진을 선택하면 바로 미리보기가 표시됩니다.</p>
+                        </div>
+
+                        <label>
+                            <span>자세 사진</span>
+                            <input id="mainPhoto" name="mainPhoto" type="file" accept="image/*" required>
+                        </label>
+
+                        <div id="photoPreviewCard" class="photo-preview-card hidden">
+                            <img id="photoPreview" alt="선택한 자세 사진 미리보기">
+                        </div>
+                    </div>
+
+                    <div class="input-group">
+                        <div class="group-header">
+                            <h3>신체 및 생활 정보</h3>
+                            <p>기본값은 한국인과 한국 사회 평균에 맞춰 설정되어 있으며, 그대로 분석에 사용할 수 있습니다.</p>
+                        </div>
+
+                        <div class="two-column">
+                            <label class="slider-field">
+                                <span>키 (cm)</span>
+                                <input id="height" name="height" type="range" min="140" max="200" step="1" value="170">
+                                <output id="heightOutput" for="height">170 cm</output>
+                            </label>
+                            <label class="slider-field">
+                                <span>책상 높이 (cm)</span>
+                                <input id="deskHeight" name="deskHeight" type="range" min="55" max="85" step="1" value="72">
+                                <output id="deskHeightOutput" for="deskHeight">72 cm</output>
+                            </label>
+                        </div>
+
+                        <div class="two-column">
+                            <label class="slider-field">
+                                <span>의자 높이 (cm)</span>
+                                <input id="chairHeight" name="chairHeight" type="range" min="35" max="60" step="1" value="43">
+                                <output id="chairHeightOutput" for="chairHeight">43 cm</output>
+                            </label>
+                            <label class="slider-field">
+                                <span>하루 스마트폰 사용시간 (시간)</span>
+                                <input id="phoneHours" name="phoneHours" type="range" min="0" max="12" step="0.5" value="4.5">
+                                <output id="phoneHoursOutput" for="phoneHours">4.5 시간</output>
+                            </label>
+                        </div>
+
+                        <div class="two-column">
+                            <label class="slider-field">
+                                <span>하루 공부 시간 (시간)</span>
+                                <input id="studyHours" name="studyHours" type="range" min="0" max="16" step="0.5" value="6">
+                                <output id="studyHoursOutput" for="studyHours">6 시간</output>
+                            </label>
+                            <label class="slider-field">
+                                <span>목 통증 정도 (10점 만점)</span>
+                                <input id="painLevel" name="painLevel" type="range" min="0" max="10" step="1" value="3">
+                                <output id="painLevelOutput" for="painLevel">3 점</output>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="input-group ai-group">
+                        <div class="group-header">
+                            <h3>AI 설정</h3>
+                            <p>API 키와 GPT 모델 옵션을 여기서 선택합니다.</p>
+                        </div>
+
+                        <label>
+                            <span>OpenAI API Key</span>
+                            <input id="apiKey" name="apiKey" type="password" placeholder="sk-..." required>
+                        </label>
+
+                        <label>
+                            <span>GPT 모델</span>
+                            <select id="model" name="model">
+                                <option value="gpt-4.1-mini" selected>GPT-4.1 mini</option>
+                                <option value="gpt-4.1">GPT-4.1</option>
+                                <option value="gpt-4o">GPT-4o</option>
+                                <option value="gpt-4o-mini">GPT-4o mini</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <button id="submitButton" type="submit">자세 분석 시작</button>
+                </form>
+            </section>
+
+            <section class="panel result-panel">
+                <div class="panel-header">
+                    <h2>분석 결과</h2>
+                    <p id="statusText">사진과 정보를 입력한 뒤 분석을 실행하세요.</p>
+                </div>
+
+                <div id="resultEmpty" class="empty-state">
+                    <p>아직 분석 결과가 없습니다.</p>
+                </div>
+
+                <div id="resultContent" class="result-content hidden">
+                    <div class="result-summary">
+                        <div>
+                            <p class="metric-label">CVA</p>
+                            <p id="cvaValue" class="metric-value">-</p>
+                        </div>
+                        <div>
+                            <p class="metric-label">위험도</p>
+                            <p id="riskBadge" class="risk-badge">-</p>
+                        </div>
+                        <div>
+                            <p class="metric-label">좌표 신뢰도</p>
+                            <p id="painSummary" class="metric-secondary">-</p>
+                        </div>
+                    </div>
+
+                    <div class="canvas-card">
+                        <div class="canvas-header">
+                            <h3>자세 사진 기준점 시각화</h3>
+                            <p>업로드한 사진 위에 tragus와 어깨 또는 C7 추정 기준점을 표시합니다.</p>
+                        </div>
+                        <canvas id="sideCanvas" width="900" height="600"></canvas>
+                    </div>
+
+                    <div class="analysis-grid">
+                        <article class="info-card">
+                            <h3>측정 근거</h3>
+                            <p id="measurementBasis"></p>
+                        </article>
+                        <article class="info-card">
+                            <h3>자세 분석</h3>
+                            <p id="postureSummary"></p>
+                        </article>
+                        <article class="info-card">
+                            <h3>개인 맞춤 피드백</h3>
+                            <p id="customFeedback"></p>
+                        </article>
+                        <article class="info-card">
+                            <h3>추천 행동</h3>
+                            <ul id="actionList" class="action-list"></ul>
+                        </article>
+                    </div>
+
+                    <div class="disclaimer">
+                        <p>
+                            이 결과는 사진 기반 추정이며 의료 진단을 대체하지 않습니다. 통증이 심하거나 지속되면 전문의 평가가 필요합니다.
+                        </p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
