@@ -15,7 +15,7 @@ void main() {
 
     expect(find.text('사진으로 거북목 자세를 분석합니다.'), findsOneWidget);
     expect(find.text('AI 설정'), findsOneWidget);
-    expect(find.text('현재 모델: gpt-4.1-mini'), findsOneWidget);
+    expect(find.text('현재 모델: gpt-4.1'), findsOneWidget);
     expect(find.text('입력 정보'), findsOneWidget);
     expect(find.text('AI 설정 열기'), findsOneWidget);
     expect(find.text('자세 분석 시작'), findsOneWidget);

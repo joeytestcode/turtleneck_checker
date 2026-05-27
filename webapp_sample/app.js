@@ -124,6 +124,26 @@ function buildRequestPayload({ model, profile, mainPhotoUrl }) {
                     point_confidence: {
                         type: "number"
                     },
+                    ai_point_review: {
+                        type: "object",
+                        additionalProperties: false,
+                        properties: {
+                            confirmed_tragus_point: pointSchema(),
+                            confirmed_shoulder_or_c7_point: pointSchema(),
+                            review_confidence: {
+                                type: "number"
+                            },
+                            review_note: {
+                                type: "string"
+                            }
+                        },
+                        required: [
+                            "confirmed_tragus_point",
+                            "confirmed_shoulder_or_c7_point",
+                            "review_confidence",
+                            "review_note"
+                        ]
+                    },
                     measurement_basis: {
                         type: "string"
                     },
@@ -138,6 +158,7 @@ function buildRequestPayload({ model, profile, mainPhotoUrl }) {
                     "tragus_point",
                     "shoulder_or_c7_point",
                     "point_confidence",
+                    "ai_point_review",
                     "measurement_basis",
                     "posture_observations"
                 ]
@@ -180,6 +201,7 @@ function buildRequestPayload({ model, profile, mainPhotoUrl }) {
                             "반드시 side_photo_assessment 안에 업로드된 자세 사진 기준 tragus_point와 shoulder_or_c7_point를 정규화 좌표로 제공해라.",
                             "정규화 좌표는 x, y를 0과 1 사이 숫자로 반환한다.",
                             "측정 기준은 귀의 tragus와 C7 또는 어깨 기준점을 연결한 각도(CVA) 계산용이다.",
+                            "반드시 side_photo_assessment.ai_point_review에 confirmed_tragus_point, confirmed_shoulder_or_c7_point, review_confidence, review_note를 포함해 포인트 자체를 재확인해라.",
                             "가능하면 사진에서 측면 정렬을 판단하고, 정면에 가까워 측정이 불확실하면 measurement_basis와 posture_observations에 그 한계를 분명히 적어라.",
                             "의학적 진단처럼 단정하지 말고 사진 기반 추정이라고 명시한다.",
                             "반드시 JSON 스키마를 지켜라. 설명 텍스트를 JSON 밖에 쓰지 마라."
@@ -282,16 +304,36 @@ async function requestAnalysis(apiKey, payload) {
 
 function normalizeAnalysis(analysis) {
     const assessment = analysis.side_photo_assessment;
-    const tragus = clampPoint(assessment.tragus_point);
-    const shoulder = clampPoint(assessment.shoulder_or_c7_point);
-    const cva = calculateCva(tragus, shoulder);
+    const reviewedTragus = clampPoint(
+        assessment.ai_point_review?.confirmed_tragus_point || assessment.tragus_point
+    );
+    const reviewedShoulder = clampPoint(
+        assessment.ai_point_review?.confirmed_shoulder_or_c7_point || assessment.shoulder_or_c7_point
+    );
+    const cva = calculateCva(reviewedTragus, reviewedShoulder);
     const risk = classifyRisk(cva);
 
     return {
         cva,
+        aiPointReviewConfidence: clamp(Number(assessment.ai_point_review?.review_confidence), 0, 1),
+        aiPointReviewNote: String(assessment.ai_point_review?.review_note || ""),
         risk,
-        tragus,
-        shoulder,
+        tragus: {
+            ...reviewedTragus,
+            label: String(
+                assessment.ai_point_review?.confirmed_tragus_point?.label ||
+                    assessment.tragus_point?.label ||
+                    "Tragus"
+            )
+        },
+        shoulder: {
+            ...reviewedShoulder,
+            label: String(
+                assessment.ai_point_review?.confirmed_shoulder_or_c7_point?.label ||
+                    assessment.shoulder_or_c7_point?.label ||
+                    "Shoulder/C7"
+            )
+        },
         pointConfidence: Number(assessment.point_confidence) || 0,
         measurementBasis: assessment.measurement_basis || "",
         postureSummary: analysis.posture_summary || "",
@@ -358,6 +400,7 @@ async function renderResults(result, photoUrl) {
     measurementBasis.textContent = [
         result.measurementBasis,
         `계산식: 어깨 또는 C7 기준점과 귀의 tragus를 연결한 선과 수평선의 각도(CVA) = ${result.cva.toFixed(1)}°`,
+        `AI 포인트 재확인: ${result.aiPointReviewNote || "코멘트 없음"} (신뢰 ${Math.round(result.aiPointReviewConfidence * 100)}%).`,
         `위험도 기준 적용: 55도 이상 정상, 50도 이상 주의, 45도 이상 경도 거북목, 45도 미만 고위험.`
     ].join(" ");
 

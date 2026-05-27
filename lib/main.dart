@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
@@ -78,7 +78,7 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
   final _imagePicker = ImagePicker();
   final _historyDatabase = AnalysisHistoryDatabase.instance;
 
-  String _model = 'gpt-4.1-mini';
+  String _model = 'gpt-4.1';
   double _height = 170;
   double _deskHeight = 72;
   double _chairHeight = 43;
@@ -504,6 +504,7 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
 
     try {
       final imageDataUrl = imageBytesToDataUrl(imageBytes);
+      final referenceGuideDataUrl = await loadMeasurementGuideDataUrl();
       final payload = buildRequestPayload(
         model: _model,
         profile: UserProfile(
@@ -515,6 +516,7 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
           neckPainLevel: _painLevel,
         ),
         mainPhotoUrl: imageDataUrl,
+        referenceGuideUrl: referenceGuideDataUrl,
       );
 
       final rawAnalysis = await requestAnalysis(
@@ -544,6 +546,7 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
             neckPainLevel: _painLevel,
           ),
           mainPhotoUrl: imageDataUrl,
+          referenceGuideUrl: referenceGuideDataUrl,
           refinementHint: buildLandmarkRefinementHint(normalized),
         );
         final refinedAnalysis = await requestAnalysis(
@@ -1493,7 +1496,7 @@ class _ResultSection extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               Text(
-                '업로드한 사진 위에 tragus와 어깨 또는 C7 기준점을 표시합니다.',
+                '업로드한 사진 위에 tragus와 C7 기준점 또는 목 뒤 하단 대체점을 표시합니다.',
                 style: theme.textTheme.bodyMedium?.copyWith(color: const Color(0xFF6B5D51)),
               ),
               const SizedBox(height: 14),
@@ -1525,7 +1528,7 @@ class _ResultSection extends StatelessWidget {
           title: '측정 근거',
           body: [
             result.measurementBasis,
-            '계산식: 어깨 또는 C7 기준점과 귀의 tragus를 연결한 선과 수평선의 각도(CVA) = ${result.cva.toStringAsFixed(1)}°',
+            '계산식: C7 극돌기 또는 목 뒤 하단 대체점에서 귀의 tragus를 이은 선과, 같은 점을 지나는 수평선 사이의 각도(CVA) = ${result.cva.toStringAsFixed(1)}°',
             '위험도 기준: 55도 이상 정상, 50도 이상 주의, 45도 이상 경도 거북목, 45도 미만 고위험.',
           ].join(' '),
         ),
@@ -2144,6 +2147,7 @@ Map<String, dynamic> buildRequestPayload({
   required String model,
   required UserProfile profile,
   required String mainPhotoUrl,
+  required String referenceGuideUrl,
   String? refinementHint,
 }) {
   final schema = {
@@ -2190,6 +2194,7 @@ Map<String, dynamic> buildRequestPayload({
 
   return {
     'model': model,
+    'temperature': 0,
     'input': [
       {
         'role': 'system',
@@ -2198,11 +2203,16 @@ Map<String, dynamic> buildRequestPayload({
             'type': 'input_text',
             'text': [
               '너는 한국어로 답하는 자세 분석 도우미다.',
+              '함께 제공되는 첫 번째 이미지는 CVA 측정 방법 예시 이미지이고, 두 번째 이미지는 실제 분석 대상 사진이다.',
               '반드시 side_photo_assessment 안에 업로드된 자세 사진 기준 tragus_point와 shoulder_or_c7_point를 정규화 좌표로 제공해라.',
               '정규화 좌표는 x, y를 0과 1 사이 숫자로 반환한다.',
-              '측정 기준은 귀의 tragus와 C7 또는 어깨 기준점을 연결한 각도(CVA) 계산용이다.',
+              'CVA는 참고 이미지와 동일하게 spinous process of C7 점을 지나는 수평선과, C7에서 귀의 tragus를 잇는 선 사이의 예각이다.',
               'tragus_point는 보이는 귀의 외이도 입구 바로 앞 작은 연골 돌기 부근 중심, 즉 귀 중앙에 가장 가까운 점으로 잡아라.',
-              'shoulder_or_c7_point는 보이는 쪽 어깨 끝(acromion) 중심 또는 C7 돌출부 중심 중 사진에서 더 확실한 인체 기준점의 중앙으로 잡아라.',
+              'shoulder_or_c7_point는 이름과 다르게 원칙적으로 C7 극돌기 중심을 반환해야 한다.',
+              'C7이 보이면 어깨(acromion)를 사용하지 말고 반드시 C7을 사용해라.',
+              '정말로 C7이 머리카락, 옷깃, 촬영 각도 때문에 식별되지 않을 때만 목 뒤 하단과 어깨선이 만나는 posterior neck base를 제한적 대체점으로 사용해라.',
+              '어깨(acromion)는 CVA 기준점으로 쓰지 말고, posterior neck base 위치를 추정할 때 보조 윤곽선으로만 참고해라.',
+              'measurement_basis에는 C7을 사용했는지, 아니면 C7이 가려져 posterior neck base를 대체 사용했는지를 반드시 명시해라.',
               '두 점 모두 반드시 사람의 윤곽선 또는 인체 내부 위에 있어야 하며, 배경, 머리카락 바깥, 옷 바깥, 빈 공간을 찍으면 안 된다.',
               '좌표를 내기 전에 내부적으로 두 점이 실제 인체 위에 있는지, tragus가 shoulder_or_c7_point보다 위쪽에 있는지 다시 확인하고 틀리면 수정해라.',
               '가능하면 사진에서 측면 정렬을 판단하고, 정면에 가까워 측정이 불확실하면 measurement_basis와 posture_observations에 그 한계를 분명히 적어라.',
@@ -2220,18 +2230,28 @@ Map<String, dynamic> buildRequestPayload({
             'type': 'input_text',
             'text': [
               '다음 정보를 반영해서 자세를 분석해줘.',
+              '첫 번째 첨부 이미지는 CVA 측정 가이드이고, 두 번째 첨부 이미지는 실제 분석 대상 사진이다.',
+              '반드시 첫 번째 가이드 이미지의 측정법을 그대로 적용하되, 좌표는 두 번째 실제 사진 기준으로만 반환해줘.',
               '키: ${profile.heightCm.round()}cm',
               '책상 높이: ${profile.deskHeightCm.round()}cm',
               '의자 높이: ${profile.chairHeightCm.round()}cm',
               '하루 스마트폰 사용시간: ${profile.smartphoneHoursPerDay.toStringAsFixed(1)}시간',
               '하루 공부 시간: ${profile.studyHoursPerDay.toStringAsFixed(1)}시간',
               '목 통증 정도: ${profile.neckPainLevel.round()}/10',
-              '업로드된 사진 한 장에서 자세를 관찰하고 CVA 측정이 가능하면 tragus와 shoulder 또는 C7 기준점을 찾아 좌표를 반환해줘.',
-              '귀 기준점은 귀 윤곽의 중앙이 아니라 tragus에 최대한 가깝게, 어깨 기준점은 어깨 외곽선이 아니라 어깨 중심 또는 C7 중심에 가깝게 잡아줘.',
+              '업로드된 사진 한 장에서 자세를 관찰하고 CVA 측정이 가능하면 tragus와 C7 기준점을 찾아 좌표를 반환해줘.',
+              'CVA는 C7 점을 지나는 수평선과 C7-tragus 선 사이 각도로 계산하므로, 원칙적으로 C7 극돌기 중심을 찾아줘.',
+              '귀 기준점은 귀 윤곽의 중앙이 아니라 tragus에 최대한 가깝게, C7 기준점은 목 뒤 하단의 C7 돌출 중심에 가깝게 잡아줘.',
+              'C7이 정말 보이지 않을 때만 목 뒤 하단과 어깨선이 만나는 posterior neck base를 대체점으로 사용하고, 그 사실을 measurement_basis에 분명히 적어줘.',
+              '특히 옷으로 어깨가 가려지거나 팔이 앞으로 나와 있는 사진에서는 어깨 끝점을 직접 기준점으로 쓰지 말고 목 뒤 하단 기준을 우선 추정해줘.',
               '기준점이 사람 밖에 있으면 안 되고, 사람이 프레임 한쪽에 치우쳐 있어도 전체 이미지 기준 정규화 좌표로 반환해줘.',
               '사진이 완전한 옆모습이 아니면 가장 합리적인 추정치를 주되, measurement_basis에 추정 한계를 적고, 메인 사진과 생활 정보를 종합해서 posture_summary와 personalized_feedback, recommended_actions를 작성해줘.',
               if (refinementHint != null && refinementHint.isNotEmpty) refinementHint,
             ].join('\n'),
+          },
+          {
+            'type': 'input_image',
+            'image_url': referenceGuideUrl,
+            'detail': 'high',
           },
           {
             'type': 'input_image',
@@ -2370,6 +2390,14 @@ bool shouldRetryLandmarkDetection(PostureAnalysisResult result) {
     return true;
   }
 
+  if (!_usesPreferredC7OrNeckBaseReference(result) && result.pointConfidence < 0.9) {
+    return true;
+  }
+
+  if (hasSuspiciousCvaRange(result)) {
+    return true;
+  }
+
   return hasImplausibleLandmarkGeometry(result.tragus, result.shoulder);
 }
 
@@ -2383,7 +2411,35 @@ bool isLandmarkDetectionBetter({
     return !candidateImplausible;
   }
 
+  final currentUsesPreferredReference = _usesPreferredC7OrNeckBaseReference(current);
+  final candidateUsesPreferredReference = _usesPreferredC7OrNeckBaseReference(candidate);
+  if (currentUsesPreferredReference != candidateUsesPreferredReference) {
+    return candidateUsesPreferredReference;
+  }
+
+  final currentSuspiciousCva = hasSuspiciousCvaRange(current);
+  final candidateSuspiciousCva = hasSuspiciousCvaRange(candidate);
+  if (currentSuspiciousCva != candidateSuspiciousCva) {
+    return !candidateSuspiciousCva;
+  }
+
   return candidate.pointConfidence >= current.pointConfidence + 0.08;
+}
+
+bool hasSuspiciousCvaRange(PostureAnalysisResult result) {
+  final deltaX = (result.tragus.x - result.shoulder.x).abs();
+  final deltaY = (result.tragus.y - result.shoulder.y).abs();
+  return result.cva > 65 || (result.cva > 60 && deltaX < deltaY * 0.45);
+}
+
+bool _usesPreferredC7OrNeckBaseReference(PostureAnalysisResult result) {
+  final basis = result.measurementBasis.toLowerCase();
+  final label = result.shoulder.label.toLowerCase();
+  return basis.contains('c7') ||
+      label.contains('c7') ||
+      basis.contains('posterior neck base') ||
+      basis.contains('neck base') ||
+      label.contains('neck base');
 }
 
 bool hasImplausibleLandmarkGeometry(AnalysisPoint tragus, AnalysisPoint shoulder) {
@@ -2419,9 +2475,13 @@ bool _isNearImageEdge(AnalysisPoint point) {
 
 String buildLandmarkRefinementHint(PostureAnalysisResult result) {
   return [
-    '이전 기준점 후보를 다시 검토해서 더 정확한 귀 중심과 어깨 중심을 찾아줘.',
+    '이전 기준점 후보를 다시 검토해서 더 정확한 귀 중심과 C7 중심을 찾아줘.',
     '이전 tragus 후보: x=${result.tragus.x.toStringAsFixed(3)}, y=${result.tragus.y.toStringAsFixed(3)}.',
     '이전 shoulder/C7 후보: x=${result.shoulder.x.toStringAsFixed(3)}, y=${result.shoulder.y.toStringAsFixed(3)}.',
+    '이전 계산 CVA는 ${result.cva.toStringAsFixed(1)}도로, 기준점이 지나치게 수직으로 잡혔을 가능성이 있으면 다시 조정해줘.',
+    '이번에는 참고 이미지의 정의처럼 C7을 지나는 수평선과 C7-tragus 선의 각도가 되도록, 가능하면 반드시 C7 극돌기 중심을 찾아줘.',
+    'C7이 가려져 있다면 어깨 끝이 아니라 목 뒤 하단과 어깨선이 만나는 posterior neck base를 대체점으로 써줘.',
+    '특히 CVA가 비정상적으로 크게 나오지 않도록, 기준점이 귀 바로 아래가 아니라 목 뒤 하단의 posterior cervical landmark인지 다시 확인해줘.',
     '이전 좌표는 사람 밖이거나 기준점 중심에서 벗어났을 가능성이 있으니, 반드시 사람 내부의 해부학적 중심점으로 다시 잡아줘.',
     '재검토 후에도 확실하지 않으면 point_confidence를 낮추고 measurement_basis에 불확실성을 적어줘.',
   ].join(' ');
@@ -2483,6 +2543,12 @@ List<String> stringList(Object? value) {
 String imageBytesToDataUrl(Uint8List bytes) {
   final encoded = base64Encode(bytes);
   return 'data:image/jpeg;base64,$encoded';
+}
+
+Future<String> loadMeasurementGuideDataUrl() async {
+  final bytes = (await rootBundle.load('webapp_sample/image.png')).buffer.asUint8List();
+  final encoded = base64Encode(bytes);
+  return 'data:image/png;base64,$encoded';
 }
 
 Future<ui.Image> decodeUiImage(Uint8List bytes) async {
