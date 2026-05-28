@@ -9,6 +9,27 @@ FlutterWindow::FlutterWindow(const flutter::DartProject& project)
 
 FlutterWindow::~FlutterWindow() {}
 
+namespace {
+
+// Original window procedure of the Flutter view child window, saved so that
+// all messages except WM_GETOBJECT can be forwarded to it.
+WNDPROC g_flutter_view_original_proc = nullptr;
+
+// Replacement window procedure for the Flutter view child window.
+// Intercepts WM_GETOBJECT before the Flutter engine processes it, which
+// prevents the Windows accessibility bridge from connecting and triggering
+// AXTree corruption bugs in the Flutter Windows engine.
+LRESULT CALLBACK FlutterViewWndProc(HWND hwnd, UINT message, WPARAM wparam,
+                                    LPARAM lparam) {
+  if (message == WM_GETOBJECT) {
+    return 0;
+  }
+  return ::CallWindowProc(g_flutter_view_original_proc, hwnd, message, wparam,
+                          lparam);
+}
+
+}  // namespace
+
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
     return false;
@@ -25,7 +46,16 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
-  SetChildContent(flutter_controller_->view()->GetNativeWindow());
+
+  HWND child_hwnd = flutter_controller_->view()->GetNativeWindow();
+  SetChildContent(child_hwnd);
+
+  // Hook the Flutter view child window so WM_GETOBJECT is blocked before the
+  // Flutter engine sees it. This prevents the Windows accessibility bridge
+  // from being established, which is the root cause of the AXTree crashes.
+  g_flutter_view_original_proc = reinterpret_cast<WNDPROC>(
+      ::SetWindowLongPtr(child_hwnd, GWLP_WNDPROC,
+                         reinterpret_cast<LONG_PTR>(FlutterViewWndProc)));
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -51,6 +81,13 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Workaround for Flutter Windows accessibility bridge crash (AXTree bug).
+  // Returning 0 for WM_GETOBJECT on the parent window prevents screen readers
+  // from triggering the accessibility bridge via the top-level window as well.
+  if (message == WM_GETOBJECT) {
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

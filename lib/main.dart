@@ -1,15 +1,16 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 const _hardcodedApiKey = '';
 const _bundledOpenAiApiKey = String.fromEnvironment('OPENAI_API_KEY');
@@ -17,7 +18,20 @@ const _bundledLegacyChatGptApiKey = String.fromEnvironment('CHATGPT_API_KEY');
 const _apiKeyPreferenceKey = 'openai_api_key';
 
 void main() {
-  runApp(const MyApp());
+  // sqflite_common_ffi must be initialized before any database calls on
+  // Windows/Linux/macOS desktop (the sqflite package uses platform channels
+  // which are only available on Android/iOS).
+  if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+
+  // ExcludeSemantics prevents the Flutter widget tree from generating
+  // accessibility nodes on Windows, which works around an AXTree corruption
+  // crash in the Flutter Windows engine (flutter/flutter#137552).
+  // This app does not require screen-reader support, so there is no
+  // user-visible impact from disabling semantics.
+  runApp(const ExcludeSemantics(child: MyApp()));
 }
 
 class MyApp extends StatelessWidget {
@@ -78,7 +92,7 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
   final _imagePicker = ImagePicker();
   final _historyDatabase = AnalysisHistoryDatabase.instance;
 
-  String _model = 'gpt-4.1';
+  String _model = 'gpt-4.1-mini';
   double _height = 170;
   double _deskHeight = 72;
   double _chairHeight = 43;
@@ -504,7 +518,8 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
 
     try {
       final imageDataUrl = imageBytesToDataUrl(imageBytes);
-      final referenceGuideDataUrl = await loadMeasurementGuideDataUrl();
+      final imgWidth = _decodedImage?.width ?? 0;
+      final imgHeight = _decodedImage?.height ?? 0;
       final payload = buildRequestPayload(
         model: _model,
         profile: UserProfile(
@@ -516,14 +531,19 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
           neckPainLevel: _painLevel,
         ),
         mainPhotoUrl: imageDataUrl,
-        referenceGuideUrl: referenceGuideDataUrl,
+        imageWidth: imgWidth,
+        imageHeight: imgHeight,
       );
 
       final rawAnalysis = await requestAnalysis(
         apiKey: _resolvedApiKey,
         payload: payload,
       );
-      var normalized = normalizeAnalysis(rawAnalysis);
+      var normalized = normalizeAnalysis(
+        rawAnalysis,
+        imageWidth: imgWidth.toDouble(),
+        imageHeight: imgHeight.toDouble(),
+      );
 
       if (shouldRetryLandmarkDetection(normalized)) {
         if (!mounted) {
@@ -546,14 +566,15 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
             neckPainLevel: _painLevel,
           ),
           mainPhotoUrl: imageDataUrl,
-          referenceGuideUrl: referenceGuideDataUrl,
           refinementHint: buildLandmarkRefinementHint(normalized),
+          imageWidth: imgWidth,
+          imageHeight: imgHeight,
         );
         final refinedAnalysis = await requestAnalysis(
           apiKey: _resolvedApiKey,
           payload: refinedPayload,
         );
-        final refinedNormalized = normalizeAnalysis(refinedAnalysis);
+        final refinedNormalized = normalizeAnalysis(refinedAnalysis, imageWidth: imgWidth.toDouble(), imageHeight: imgHeight.toDouble());
         if (isLandmarkDetectionBetter(current: normalized, candidate: refinedNormalized)) {
           normalized = refinedNormalized;
         }
@@ -864,9 +885,16 @@ class _PostureCheckerScreenState extends State<PostureCheckerScreen> {
                                         borderRadius: BorderRadius.circular(22),
                                       ),
                                     ),
-                                    child: Text(
-                                      _isSubmitting ? '분석 중...' : '자세 분석 시작',
-                                    ),
+                                    child: _isSubmitting
+                                        ? const SizedBox(
+                                            height: 22,
+                                            width: 22,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2.5,
+                                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                            ),
+                                          )
+                                        : const Text('자세 분석 시작'),
                                   ),
                                 ),
                               ],
@@ -1496,7 +1524,7 @@ class _ResultSection extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               Text(
-                '업로드한 사진 위에 tragus와 C7 기준점 또는 목 뒤 하단 대체점을 표시합니다.',
+                '업로드한 사진 위에 tragus와 어깨 또는 C7 기준점을 표시합니다.',
                 style: theme.textTheme.bodyMedium?.copyWith(color: const Color(0xFF6B5D51)),
               ),
               const SizedBox(height: 14),
@@ -1511,6 +1539,7 @@ class _ResultSection extends StatelessWidget {
                         tragus: result.tragus,
                         shoulder: result.shoulder,
                         cva: result.cva,
+                        faceDirectionRight: result.faceDirectionRight,
                       ),
                     ),
                   ),
@@ -1528,7 +1557,7 @@ class _ResultSection extends StatelessWidget {
           title: '측정 근거',
           body: [
             result.measurementBasis,
-            '계산식: C7 극돌기 또는 목 뒤 하단 대체점에서 귀의 tragus를 이은 선과, 같은 점을 지나는 수평선 사이의 각도(CVA) = ${result.cva.toStringAsFixed(1)}°',
+            '계산식: 어깨 또는 C7 기준점과 귀의 tragus를 연결한 선과 수평선의 각도(CVA) = ${result.cva.toStringAsFixed(1)}°',
             '위험도 기준: 55도 이상 정상, 50도 이상 주의, 45도 이상 경도 거북목, 45도 미만 고위험.',
           ].join(' '),
         ),
@@ -2059,19 +2088,50 @@ class AnnotatedPhotoPainter extends CustomPainter {
     required this.tragus,
     required this.shoulder,
     required this.cva,
+    required this.faceDirectionRight,
   });
 
   final ui.Image image;
   final AnalysisPoint tragus;
   final AnalysisPoint shoulder;
   final double cva;
+  final bool faceDirectionRight;
 
   @override
   void paint(Canvas canvas, Size size) {
     paintImage(canvas: canvas, rect: Offset.zero & size, image: image, fit: BoxFit.cover);
 
-    final tragusPoint = Offset(tragus.x * size.width, tragus.y * size.height);
-    final shoulderPoint = Offset(shoulder.x * size.width, shoulder.y * size.height);
+    // Use the AI-declared face direction rather than deriving it from the
+    // (potentially wrong) landmark x-positions.
+    final faceRight = faceDirectionRight;
+    final deltaXNorm = (tragus.x - shoulder.x).abs();
+
+    final Offset tragusPoint;
+    final Offset shoulderPoint;
+
+    if (deltaXNorm >= 0.20) {
+      // Wide horizontal separation → coordinate-based CVA is used.
+      // The AI coordinates are reliable in this regime; draw them as-is.
+      tragusPoint = Offset(tragus.x * size.width, tragus.y * size.height);
+      shoulderPoint = Offset(shoulder.x * size.width, shoulder.y * size.height);
+    } else {
+      // Narrow horizontal separation → AI direct CVA estimate is used.
+      // Individual AI coordinates can be inaccurate here, so reconstruct
+      // BOTH points symmetrically around the midpoint of the AI coordinates
+      // at the correct CVA angle.  This ensures the drawn line is geometrically
+      // consistent with the displayed CVA value AND that both dots remain within
+      // the region the AI identified as the target area.
+      final midX = (tragus.x + shoulder.x) / 2 * size.width;
+      final midY = (tragus.y + shoulder.y) / 2 * size.height;
+      final halfLen = size.height * 0.12;
+      final angleRad = cva * math.pi / 180;
+      final dx = halfLen * math.cos(angleRad);
+      final dy = halfLen * math.sin(angleRad);
+      // Tragus is on the face side (upper); shoulder/C7 is posterior (lower).
+      tragusPoint = Offset(midX + (faceRight ? dx : -dx), midY - dy);
+      shoulderPoint = Offset(midX - (faceRight ? dx : -dx), midY + dy);
+    }
+
     final strokeWidth = math.max(3.0, size.width / 120);
     final segmentPaint = Paint()
       ..color = const Color(0xFFC46F2A)
@@ -2083,9 +2143,15 @@ class AnnotatedPhotoPainter extends CustomPainter {
       ..style = PaintingStyle.stroke;
 
     canvas.drawLine(shoulderPoint, tragusPoint, segmentPaint);
+    // Baseline extends in the posterior direction (away from the face).
     canvas.drawLine(
       shoulderPoint,
-      Offset(math.min(size.width - 16, shoulderPoint.dx + size.width * 0.2), shoulderPoint.dy),
+      Offset(
+        faceRight
+            ? math.min(size.width - 16, shoulderPoint.dx + size.width * 0.2)
+            : math.max(16.0, shoulderPoint.dx - size.width * 0.2),
+        shoulderPoint.dy,
+      ),
       baselinePaint,
     );
 
@@ -2139,7 +2205,8 @@ class AnnotatedPhotoPainter extends CustomPainter {
     return oldDelegate.image != image ||
         oldDelegate.tragus != tragus ||
         oldDelegate.shoulder != shoulder ||
-        oldDelegate.cva != cva;
+        oldDelegate.cva != cva ||
+        oldDelegate.faceDirectionRight != faceDirectionRight;
   }
 }
 
@@ -2147,8 +2214,9 @@ Map<String, dynamic> buildRequestPayload({
   required String model,
   required UserProfile profile,
   required String mainPhotoUrl,
-  required String referenceGuideUrl,
   String? refinementHint,
+  int imageWidth = 0,
+  int imageHeight = 0,
 }) {
   final schema = {
     'type': 'object',
@@ -2158,8 +2226,10 @@ Map<String, dynamic> buildRequestPayload({
         'type': 'object',
         'additionalProperties': false,
         'properties': {
+          'face_direction_right': {'type': 'boolean'},
           'tragus_point': pointSchema(),
           'shoulder_or_c7_point': pointSchema(),
+          'cva_angle_degrees': {'type': 'number'},
           'point_confidence': {'type': 'number'},
           'measurement_basis': {'type': 'string'},
           'posture_observations': {
@@ -2168,8 +2238,10 @@ Map<String, dynamic> buildRequestPayload({
           },
         },
         'required': [
+          'face_direction_right',
           'tragus_point',
           'shoulder_or_c7_point',
+          'cva_angle_degrees',
           'point_confidence',
           'measurement_basis',
           'posture_observations',
@@ -2194,7 +2266,6 @@ Map<String, dynamic> buildRequestPayload({
 
   return {
     'model': model,
-    'temperature': 0,
     'input': [
       {
         'role': 'system',
@@ -2203,18 +2274,16 @@ Map<String, dynamic> buildRequestPayload({
             'type': 'input_text',
             'text': [
               '너는 한국어로 답하는 자세 분석 도우미다.',
-              '함께 제공되는 첫 번째 이미지는 CVA 측정 방법 예시 이미지이고, 두 번째 이미지는 실제 분석 대상 사진이다.',
               '반드시 side_photo_assessment 안에 업로드된 자세 사진 기준 tragus_point와 shoulder_or_c7_point를 정규화 좌표로 제공해라.',
-              '정규화 좌표는 x, y를 0과 1 사이 숫자로 반환한다.',
-              'CVA는 참고 이미지와 동일하게 spinous process of C7 점을 지나는 수평선과, C7에서 귀의 tragus를 잇는 선 사이의 예각이다.',
-              'tragus_point는 보이는 귀의 외이도 입구 바로 앞 작은 연골 돌기 부근 중심, 즉 귀 중앙에 가장 가까운 점으로 잡아라.',
-              'shoulder_or_c7_point는 이름과 다르게 원칙적으로 C7 극돌기 중심을 반환해야 한다.',
-              'C7이 보이면 어깨(acromion)를 사용하지 말고 반드시 C7을 사용해라.',
-              '정말로 C7이 머리카락, 옷깃, 촬영 각도 때문에 식별되지 않을 때만 목 뒤 하단과 어깨선이 만나는 posterior neck base를 제한적 대체점으로 사용해라.',
-              '어깨(acromion)는 CVA 기준점으로 쓰지 말고, posterior neck base 위치를 추정할 때 보조 윤곽선으로만 참고해라.',
-              'measurement_basis에는 C7을 사용했는지, 아니면 C7이 가려져 posterior neck base를 대체 사용했는지를 반드시 명시해라.',
-              '두 점 모두 반드시 사람의 윤곽선 또는 인체 내부 위에 있어야 하며, 배경, 머리카락 바깥, 옷 바깥, 빈 공간을 찍으면 안 된다.',
-              '좌표를 내기 전에 내부적으로 두 점이 실제 인체 위에 있는지, tragus가 shoulder_or_c7_point보다 위쪽에 있는지 다시 확인하고 틀리면 수정해라.',
+              '정규화 좌표는 x, y를 0과 1 사이 숫자로 반환한다. x=0은 이미지 왼쪽 끝, x=1은 오른쪽 끝, y=0은 이미지 위 끝, y=1은 아래 끝이다.',
+              '【기준점 찾는 순서 — 반드시 지켜라】',
+              '① 얼굴 방향 파악(최우선): 코·눈·입이 향하는 쪽을 확인해라. 오른쪽이면 face_direction_right=true, 왼쪽이면 false. 이 값이 틀리면 나머지 좌표가 전부 틀린다.',
+              '② 귀(ear)를 찾아라. 귀는 두상 옆에 있는 C자·타원형 연골 구조물이다. 얼굴 윤곽(이마→코→입→턱선)과 혼동하지 마라. 귀 전체의 상하 범위(y 좌표 구간)를 파악해라.',
+              '③ tragus_point: 귀의 전면 하단, 외이도 입구를 살짝 막는 작은 삼각형 연골 돌기. 턱관절(TMJ)·턱선에 찍으면 안 된다. 반드시 이미지 상반부(y < 0.50)에 위치한다.',
+              '④ shoulder_or_c7_point: face_direction_right가 true(오른쪽을 봄)이면 tragus_point보다 x값이 작은 쪽(왼쪽, 목 후방)에서 찾아라. false(왼쪽을 봄)이면 x값이 큰 쪽(오른쪽, 목 후방)에서 찾아라. C7(목 뒤 가장 돌출된 경추 7번)을 우선으로, 가려지면 어깨 끝(acromion)을 사용해라.',
+              '⑤ 방향·위치 최종 검증: face_direction_right에 따라 shoulder_or_c7_point.x 위치를 재확인해라. tragus.y < shoulder_or_c7_point.y (귀가 어깨보다 위)이어야 한다. 두 점 모두 피부·옷·머리카락 위에 있어야 한다.',
+              'shoulder_or_c7_point에 사용한 기준점(C7 또는 acromion)을 measurement_basis에 명시해라.',
+              'CVA(두경부 전방 기울기 각도)는 다음과 같이 측정한다: shoulder_or_c7_point를 지나는 수평선과 shoulder_or_c7_point에서 tragus_point를 향하는 직선 사이의 각도. 이 각도를 cva_angle_degrees에 소수점 한 자리 숫자로 기입해라. 정상 CVA ≥ 55°이며 값이 작을수록 앞쪽으로 기울어진 거북목이다. CVA는 사진을 보고 두 기준점의 실제 픽셀 위치와 이미지 가로세로 비율을 감안해 직접 계산해라.',
               '가능하면 사진에서 측면 정렬을 판단하고, 정면에 가까워 측정이 불확실하면 measurement_basis와 posture_observations에 그 한계를 분명히 적어라.',
               '기준점이 가려졌거나 흐리면 억지로 확정하지 말고 point_confidence를 낮춰라.',
               '의학적 진단처럼 단정하지 말고 사진 기반 추정이라고 명시한다.',
@@ -2230,28 +2299,20 @@ Map<String, dynamic> buildRequestPayload({
             'type': 'input_text',
             'text': [
               '다음 정보를 반영해서 자세를 분석해줘.',
-              '첫 번째 첨부 이미지는 CVA 측정 가이드이고, 두 번째 첨부 이미지는 실제 분석 대상 사진이다.',
-              '반드시 첫 번째 가이드 이미지의 측정법을 그대로 적용하되, 좌표는 두 번째 실제 사진 기준으로만 반환해줘.',
+              if (imageWidth > 0 && imageHeight > 0)
+                '이미지 해상도: $imageWidth×${imageHeight}px',
               '키: ${profile.heightCm.round()}cm',
               '책상 높이: ${profile.deskHeightCm.round()}cm',
               '의자 높이: ${profile.chairHeightCm.round()}cm',
               '하루 스마트폰 사용시간: ${profile.smartphoneHoursPerDay.toStringAsFixed(1)}시간',
               '하루 공부 시간: ${profile.studyHoursPerDay.toStringAsFixed(1)}시간',
               '목 통증 정도: ${profile.neckPainLevel.round()}/10',
-              '업로드된 사진 한 장에서 자세를 관찰하고 CVA 측정이 가능하면 tragus와 C7 기준점을 찾아 좌표를 반환해줘.',
-              'CVA는 C7 점을 지나는 수평선과 C7-tragus 선 사이 각도로 계산하므로, 원칙적으로 C7 극돌기 중심을 찾아줘.',
-              '귀 기준점은 귀 윤곽의 중앙이 아니라 tragus에 최대한 가깝게, C7 기준점은 목 뒤 하단의 C7 돌출 중심에 가깝게 잡아줘.',
-              'C7이 정말 보이지 않을 때만 목 뒤 하단과 어깨선이 만나는 posterior neck base를 대체점으로 사용하고, 그 사실을 measurement_basis에 분명히 적어줘.',
-              '특히 옷으로 어깨가 가려지거나 팔이 앞으로 나와 있는 사진에서는 어깨 끝점을 직접 기준점으로 쓰지 말고 목 뒤 하단 기준을 우선 추정해줘.',
+              '업로드된 사진 한 장에서 자세를 관찰하고 CVA 측정이 가능하면 tragus와 shoulder 또는 C7 기준점을 찾아 좌표를 반환해줘.',
+              '귀 기준점은 귀 윤곽의 중앙이 아니라 tragus에 최대한 가깝게, 어깨 기준점은 어깨 외곽선이 아니라 어깨 중심 또는 C7 중심에 가깝게 잡아줘.',
               '기준점이 사람 밖에 있으면 안 되고, 사람이 프레임 한쪽에 치우쳐 있어도 전체 이미지 기준 정규화 좌표로 반환해줘.',
               '사진이 완전한 옆모습이 아니면 가장 합리적인 추정치를 주되, measurement_basis에 추정 한계를 적고, 메인 사진과 생활 정보를 종합해서 posture_summary와 personalized_feedback, recommended_actions를 작성해줘.',
               if (refinementHint != null && refinementHint.isNotEmpty) refinementHint,
             ].join('\n'),
-          },
-          {
-            'type': 'input_image',
-            'image_url': referenceGuideUrl,
-            'detail': 'high',
           },
           {
             'type': 'input_image',
@@ -2361,20 +2422,38 @@ Map<String, dynamic>? safeJsonMap(String body) {
   }
 }
 
-PostureAnalysisResult normalizeAnalysis(Map<String, dynamic> analysis) {
+PostureAnalysisResult normalizeAnalysis(
+  Map<String, dynamic> analysis, {
+  double imageWidth = 1,
+  double imageHeight = 1,
+}) {
   final assessment = (analysis['side_photo_assessment'] as Map?)?.cast<String, dynamic>() ?? {};
   final tragus = clampPoint((assessment['tragus_point'] as Map?)?.cast<String, dynamic>() ?? {});
   final shoulder = clampPoint(
     (assessment['shoulder_or_c7_point'] as Map?)?.cast<String, dynamic>() ?? {},
   );
-  final cva = calculateCva(tragus, shoulder);
+  final coordCva = calculateCva(tragus, shoulder, imageWidth: imageWidth, imageHeight: imageHeight);
+  final aiCva = (assessment['cva_angle_degrees'] as num?)?.toDouble();
+  final deltaXNorm = (tragus.x - shoulder.x).abs();
+  // When landmarks have wide horizontal separation (≥20% image width), the
+  // coordinate-based CVA is more reliable because the angle is well-defined.
+  // Below that threshold the AI's direct visual estimate tends to be more accurate.
+  final cva = deltaXNorm >= 0.20
+      ? coordCva
+      : (aiCva != null && aiCva >= 20 && aiCva <= 85 ? aiCva : coordCva);
   final risk = classifyRisk(cva);
+
+  // AI explicitly states face direction; fall back to inferring from landmark
+  // x-positions only when the field is missing (e.g. old responses).
+  final faceDirectionRight =
+      assessment['face_direction_right'] as bool? ?? (tragus.x >= shoulder.x);
 
   return PostureAnalysisResult(
     cva: cva,
     risk: risk,
     tragus: tragus,
     shoulder: shoulder,
+    faceDirectionRight: faceDirectionRight,
     pointConfidence: (assessment['point_confidence'] as num?)?.toDouble() ?? 0,
     measurementBasis: analysisString(assessment['measurement_basis']),
     postureSummary: analysisString(analysis['posture_summary']),
@@ -2390,61 +2469,47 @@ bool shouldRetryLandmarkDetection(PostureAnalysisResult result) {
     return true;
   }
 
-  if (!_usesPreferredC7OrNeckBaseReference(result) && result.pointConfidence < 0.9) {
-    return true;
-  }
-
-  if (hasSuspiciousCvaRange(result)) {
-    return true;
-  }
-
-  return hasImplausibleLandmarkGeometry(result.tragus, result.shoulder);
+  return hasImplausibleLandmarkGeometry(
+    result.tragus,
+    result.shoulder,
+    faceDirectionRight: result.faceDirectionRight,
+  );
 }
 
 bool isLandmarkDetectionBetter({
   required PostureAnalysisResult current,
   required PostureAnalysisResult candidate,
 }) {
-  final currentImplausible = hasImplausibleLandmarkGeometry(current.tragus, current.shoulder);
-  final candidateImplausible = hasImplausibleLandmarkGeometry(candidate.tragus, candidate.shoulder);
+  final currentImplausible = hasImplausibleLandmarkGeometry(
+    current.tragus,
+    current.shoulder,
+    faceDirectionRight: current.faceDirectionRight,
+  );
+  final candidateImplausible = hasImplausibleLandmarkGeometry(
+    candidate.tragus,
+    candidate.shoulder,
+    faceDirectionRight: candidate.faceDirectionRight,
+  );
   if (currentImplausible != candidateImplausible) {
     return !candidateImplausible;
-  }
-
-  final currentUsesPreferredReference = _usesPreferredC7OrNeckBaseReference(current);
-  final candidateUsesPreferredReference = _usesPreferredC7OrNeckBaseReference(candidate);
-  if (currentUsesPreferredReference != candidateUsesPreferredReference) {
-    return candidateUsesPreferredReference;
-  }
-
-  final currentSuspiciousCva = hasSuspiciousCvaRange(current);
-  final candidateSuspiciousCva = hasSuspiciousCvaRange(candidate);
-  if (currentSuspiciousCva != candidateSuspiciousCva) {
-    return !candidateSuspiciousCva;
   }
 
   return candidate.pointConfidence >= current.pointConfidence + 0.08;
 }
 
-bool hasSuspiciousCvaRange(PostureAnalysisResult result) {
-  final deltaX = (result.tragus.x - result.shoulder.x).abs();
-  final deltaY = (result.tragus.y - result.shoulder.y).abs();
-  return result.cva > 65 || (result.cva > 60 && deltaX < deltaY * 0.45);
-}
-
-bool _usesPreferredC7OrNeckBaseReference(PostureAnalysisResult result) {
-  final basis = result.measurementBasis.toLowerCase();
-  final label = result.shoulder.label.toLowerCase();
-  return basis.contains('c7') ||
-      label.contains('c7') ||
-      basis.contains('posterior neck base') ||
-      basis.contains('neck base') ||
-      label.contains('neck base');
-}
-
-bool hasImplausibleLandmarkGeometry(AnalysisPoint tragus, AnalysisPoint shoulder) {
+bool hasImplausibleLandmarkGeometry(
+  AnalysisPoint tragus,
+  AnalysisPoint shoulder, {
+  bool? faceDirectionRight,
+}) {
   final deltaX = (tragus.x - shoulder.x).abs();
   final deltaY = shoulder.y - tragus.y;
+
+  // Ear is always in the upper half of the image in any standard posture photo.
+  // If tragus.y >= 0.50, the AI has likely confused the ear with the jaw or TMJ.
+  if (tragus.y >= 0.50) {
+    return true;
+  }
 
   if (tragus.y >= shoulder.y) {
     return true;
@@ -2462,6 +2527,16 @@ bool hasImplausibleLandmarkGeometry(AnalysisPoint tragus, AnalysisPoint shoulder
     return true;
   }
 
+  // When the AI explicitly told us the face direction, verify that the
+  // shoulder/C7 point is on the posterior (opposite) side of the tragus.
+  if (faceDirectionRight != null) {
+    final shoulderShouldBeLeft = faceDirectionRight; // right-facing → C7 is left of ear
+    final shoulderIsLeft = shoulder.x < tragus.x;
+    if (shoulderShouldBeLeft != shoulderIsLeft) {
+      return true; // C7/shoulder placed on the wrong (anterior) side
+    }
+  }
+
   return false;
 }
 
@@ -2474,15 +2549,22 @@ bool _isNearImageEdge(AnalysisPoint point) {
 }
 
 String buildLandmarkRefinementHint(PostureAnalysisResult result) {
+  final faceDir = result.faceDirectionRight ? '오른쪽' : '왼쪽';
+  final posteriorSide = result.faceDirectionRight ? '왼쪽(x값이 더 작은 쪽)' : '오른쪽(x값이 더 큰 쪽)';
+  final directionOk = result.faceDirectionRight
+      ? result.shoulder.x < result.tragus.x
+      : result.shoulder.x > result.tragus.x;
+
   return [
-    '이전 기준점 후보를 다시 검토해서 더 정확한 귀 중심과 C7 중심을 찾아줘.',
-    '이전 tragus 후보: x=${result.tragus.x.toStringAsFixed(3)}, y=${result.tragus.y.toStringAsFixed(3)}.',
-    '이전 shoulder/C7 후보: x=${result.shoulder.x.toStringAsFixed(3)}, y=${result.shoulder.y.toStringAsFixed(3)}.',
-    '이전 계산 CVA는 ${result.cva.toStringAsFixed(1)}도로, 기준점이 지나치게 수직으로 잡혔을 가능성이 있으면 다시 조정해줘.',
-    '이번에는 참고 이미지의 정의처럼 C7을 지나는 수평선과 C7-tragus 선의 각도가 되도록, 가능하면 반드시 C7 극돌기 중심을 찾아줘.',
-    'C7이 가려져 있다면 어깨 끝이 아니라 목 뒤 하단과 어깨선이 만나는 posterior neck base를 대체점으로 써줘.',
-    '특히 CVA가 비정상적으로 크게 나오지 않도록, 기준점이 귀 바로 아래가 아니라 목 뒤 하단의 posterior cervical landmark인지 다시 확인해줘.',
-    '이전 좌표는 사람 밖이거나 기준점 중심에서 벗어났을 가능성이 있으니, 반드시 사람 내부의 해부학적 중심점으로 다시 잡아줘.',
+    '이전 기준점을 다시 검토해줘.',
+    '사진 속 인물은 $faceDir을 바라보고 있다(face_direction_right=${result.faceDirectionRight}).',
+    if (!directionOk)
+      '⚠️ 오류: shoulder_or_c7_point가 얼굴 방향(앞쪽)에 잘못 배치됐다. C7·acromion은 반드시 목의 $posteriorSide 후방에 있어야 한다.',
+    if (result.tragus.y >= 0.50)
+      '⚠️ 오류: tragus_point.y=${result.tragus.y.toStringAsFixed(3)}으로 이미지 하반부에 위치한다. 귀는 이미지 상반부(y<0.50)에 있어야 한다. 턱이나 TMJ와 혼동하지 마라.',
+    '이전 tragus: x=${result.tragus.x.toStringAsFixed(3)}, y=${result.tragus.y.toStringAsFixed(3)}.',
+    '이전 shoulder/C7: x=${result.shoulder.x.toStringAsFixed(3)}, y=${result.shoulder.y.toStringAsFixed(3)}.',
+    '귀 위치를 재확인하고, shoulder_or_c7_point는 $posteriorSide에 배치해라.',
     '재검토 후에도 확실하지 않으면 point_confidence를 낮추고 measurement_basis에 불확실성을 적어줘.',
   ].join(' ');
 }
@@ -2503,14 +2585,18 @@ double clamp(double value, double min, double max) {
   return math.min(math.max(value, min), max);
 }
 
-double calculateCva(AnalysisPoint tragus, AnalysisPoint shoulder) {
-  final deltaX = (tragus.x - shoulder.x).abs();
-  final deltaY = (tragus.y - shoulder.y).abs();
-  if (deltaX == 0 && deltaY == 0) {
-    return 0;
-  }
-
-  final radians = math.atan2(deltaY, deltaX == 0 ? 0.0001 : deltaX);
+double calculateCva(
+  AnalysisPoint tragus,
+  AnalysisPoint shoulder, {
+  double imageWidth = 1,
+  double imageHeight = 1,
+}) {
+  // Convert to pixel space so that aspect ratio doesn't distort the angle.
+  final deltaXPx = (tragus.x - shoulder.x).abs() * imageWidth;
+  final deltaYPx = (shoulder.y - tragus.y) * imageHeight; // positive when shoulder is below tragus
+  if (deltaXPx < 1e-6 && deltaYPx < 1e-6) return 0;
+  if (deltaYPx <= 0) return 0;
+  final radians = math.atan2(deltaYPx, deltaXPx < 1e-6 ? 0.001 : deltaXPx);
   return double.parse((radians * (180 / math.pi)).toStringAsFixed(1));
 }
 
@@ -2545,12 +2631,6 @@ String imageBytesToDataUrl(Uint8List bytes) {
   return 'data:image/jpeg;base64,$encoded';
 }
 
-Future<String> loadMeasurementGuideDataUrl() async {
-  final bytes = (await rootBundle.load('webapp_sample/image.png')).buffer.asUint8List();
-  final encoded = base64Encode(bytes);
-  return 'data:image/png;base64,$encoded';
-}
-
 Future<ui.Image> decodeUiImage(Uint8List bytes) async {
   final codec = await ui.instantiateImageCodec(bytes);
   final frame = await codec.getNextFrame();
@@ -2581,6 +2661,7 @@ class PostureAnalysisResult {
     required this.risk,
     required this.tragus,
     required this.shoulder,
+    required this.faceDirectionRight,
     required this.pointConfidence,
     required this.measurementBasis,
     required this.postureSummary,
@@ -2594,6 +2675,8 @@ class PostureAnalysisResult {
   final RiskLevel risk;
   final AnalysisPoint tragus;
   final AnalysisPoint shoulder;
+  /// true = person faces right in the image; false = faces left.
+  final bool faceDirectionRight;
   final double pointConfidence;
   final String measurementBasis;
   final String postureSummary;
